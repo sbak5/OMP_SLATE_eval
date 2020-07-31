@@ -13,7 +13,7 @@ The commit where we started our modification is ba56714719294ad7aa15a1351c201e64
 SLATE library we used for evaluation is forked from 
 https://bitbucket.org/icl/slate/commits/25d580fb1b02a411d088d5838d10b27cee2124d9. 
 
-We tested on NERSC Cori Haswell nodes(Intel E5-2698v3-16C/32T, 2 socket/node)
+We tested on NERSC Cori Haswell nodes(Intel E5-2698v3-16C/32T, 2 socket/node) and GPU nodes (Intel Skylake 6148-20C/40T+V100)
 and ANL JLSE Skylake(Intel Skylake 8180M-28C/56T, 2 socket/node) nodes
 
 .. image:: https://zenodo.org/badge/256908571.svg
