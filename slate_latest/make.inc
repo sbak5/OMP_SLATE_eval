@@ -1,0 +1,9 @@
+CXX=mpic++
+FC=mpifort
+mpi=1
+blas=mkl
+mkl_blacs=openmpi
+mkl_threaded=1
+cuda=1
+cuda_arch="volta"
+openmp=1

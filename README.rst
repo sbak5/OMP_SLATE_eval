@@ -62,36 +62,15 @@ Instruction for Experiments
 ---------------------------------------------
 - Scripts to run experiments are stored in "slate/test". 
 
-- run_test_all_<jlse/cori>.sh runs all experiments for evaluation on a single node or multi nodes.     
-    This script needs 4 arguments for experiments as following. 
 
-    .. code-block:: console
-
-        $ ./run_test_all_<machine_name: jlse, cori>.sh <start_matrix_size> <max_matrix_size> <increment_until_max> <num_physical_nodes>
-
-
-- The following is an example to run the script with appropriate paramters on qsub-supported systems. 
+- The following is an example to run the script with appropriate paramters on slurm-supported systems. 
 
   .. code-block:: console
 
-    $ sbatch -n 1 -q gpu -t 01:00:00 ./run_test_all_cori.sh 1000 10000 1000 1 // Cori
-    # Run this script on a single physical nodes with input matrices of [1000:10000:1000] columns. 
-    
-    $ sbatch -n 16 -q gpu --contiguous -t 06:00:00 ./run_test_each_cori.sh 10000 80000 10000 1 [getrf,geqrf,potrf]
+    $ sbatch -n 16 -q gpu --contiguous -t 06:00:00 ./run_test_each_cori.sh 10000 80000 10000 1 [getrf,geqrf,potrf] [process_grid]
     # Run this script on multi nodes with input matrices of [10000:80000:10000] columns
 
-- run_trace.sh generates the trace of Cholesky factorization. 
-    It has an argument to run on single or multi-nodes.
-
-    .. code-block:: console
-
-        $ ./run_trace.sh <num_physical_nodes>
-        $ qsub -n 1 -q compute -t 01:00:00 ./run_trace.sh 1
-        # Generate trace of Cholesky on a single node
-
-- In both scripts, you should change EXP_ROOT to proper directory where you clone your SC20_Artifact
-
-- Each script will generate results at slate/test/<DATE>_<TIME>. You can use parse_<jlse/cori>.sh to generate average of multiple runs in the result directory
+- Each script will generate results at slate/test/<DATE>_<TIME>. You can use parse_cori.sh to generate average of multiple runs in the result directory
 
   .. code-block:: console
 
