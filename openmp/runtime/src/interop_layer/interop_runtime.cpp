@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <vector>
 int (*real_sched_yield)() = NULL;
-thread_local int inOpenMP=0;
 
 int interop_omp_init=0;
 std::atomic<int> interop_init_workers;
@@ -26,7 +25,9 @@ std::vector<kmp_int32> __kmp_core_id_list;
 kmp_int32 __kmp_core_id_idx;
 //#endif
 
-
+bool __kmp_task_is_allowed(int gtid, const kmp_int32 is_constrained,
+                                  const kmp_taskdata_t *tasknew,
+                                  const kmp_taskdata_t *taskcurr);
 #if HCLIB_OMP
 extern "C" void hclib_interop_init() {
 //  if (hclib_get_current_worker() == -2) {
@@ -42,6 +43,7 @@ extern "C" void hclib_interop_init() {
       // The worker with id 0 will be resumed if the first thread initiating OpenMP runtime is terminated
       interop_ext_comm *ptr = &(interop_thread_local(commStruct));
       pthread_mutex_lock(&(ptr->mutex));
+      KA_TRACE(1, ("__kmp_suspend_conv_thread: T#%d  is suspended on worker [%d, %p]\n", __kmp_get_gtid(), interop_get_worker_id(),interop_get_worker_state()));
       ptr->worker_suspended = 1;
       pthread_cond_wait(&(ptr->cond), &(ptr->mutex));
       interop_steal_worker_state(0);
@@ -71,7 +73,7 @@ __kmp_conv_init(int argc, char **argv) {
   CmiInitMemAffinity(argv);
   CmiInitCPUTopology(argv);
   CmiNodeAllBarrier(); 
-  inOpenMP=0;
+  interop_thread_local(inOpenMP)=0;
   //CmiCheckAffinity();
   /* Skip comm and master thread */ 
   if (interop_get_worker_id() != interop_get_num_workers() || interop_get_worker_id() != 0) {
@@ -118,19 +120,21 @@ void interop_var_initialize() {
   //Initial thread have this id number
   if (tid == -2) {
 //    prevGtid =  new int[interop_get_num_workers()]{-2}; //(int *) __kmp_allocate(sizeof(int) * interop_get_num_workers());
-    prevGtid = new std::vector<int>*[interop_get_num_workers()];
-    masterRunning = new std::vector<int>*[interop_get_num_workers()];
+    prevGtid = new std::vector<std::vector<int>>(interop_get_num_workers(),std::vector<int>(INIT_NEST_LEVEL, -2));
+    masterRunning = new std::vector<std::vector<int>>(interop_get_num_workers(), std::vector<int>(INIT_NEST_LEVEL, 0));
 
-    for (int i =0 ; i < interop_get_num_workers(); i++) {
+/*    for (int i =0 ; i < interop_get_num_workers(); i++) {
       prevGtid[i] = new std::vector<int>(INIT_NEST_LEVEL, -2);
       masterRunning[i] = new std::vector<int>(INIT_NEST_LEVEL, 0);
-    }
+    }*/
 //    masterRunning = new int[interop_get_num_workers()]{0}; //(int*) __kmp_allocate(sizeof(int) * interop_get_num_workers());
     commStruct = new interop_ext_comm[interop_get_num_workers()](); //(interop_ext_comm *) __kmp_allocate(sizeof(interop_ext_comm)*interop_get_num_workers());
-    interop_worker_init = new int[interop_get_num_workers()]{0};
+    interop_worker_init = new std::vector<AlignedInt>(interop_get_num_workers());// new int[interop_get_num_workers()]{0};
+    inOpenMP = new std::vector<AlignedInt>(interop_get_num_workers());// new int[interop_get_num_workers()]{0};
 
-    nest_level = new int[interop_get_num_workers()]{0};
+    nest_level = new std::vector<AlignedInt>(interop_get_num_workers());  // int[interop_get_num_workers()]{0};
     tid = 0;
+    atomic_thread_fence(std::memory_order_release);
   }
   
 /*  interop_thread_local(prevGtid) = -2;
@@ -337,7 +341,11 @@ extern "C" int sched_yield(void) {
   if (real_sched_yield == NULL)
     *(void**)(&real_sched_yield) = dlsym(RTLD_NEXT, "sched_yield");
 
-  if (interop_worker_init && interop_thread_local(interop_worker_init) && inOpenMP) {
+  if (interop_get_worker_id() < 0 || interop_get_worker_id() >= interop_get_num_workers()) {
+    return real_sched_yield();
+  }
+
+  if (interop_worker_init && interop_thread_local(interop_worker_init) && inOpenMP && interop_thread_local(inOpenMP)) {
     //printf("sched_yield_replacing\n");
     int th_gtid = __kmp_gtid_get_specific(); 
     if (KMP_MASTER_GTID(th_gtid)) {
@@ -367,7 +375,7 @@ extern "C" int sched_yield(void) {
      }
 #endif
 #endif
-     inOpenMP=1;
+     interop_thread_local(inOpenMP)=1;
      interop_thread_local(masterRunning) = 0;
      real_sched_yield();
     }
@@ -383,7 +391,7 @@ extern "C" int sched_yield(void) {
       CthSetStrategyWorkStealing(__kmp_threads[th_gtid]->th.th_info.ds.ds_thread);
 #endif
 //      inOpenMP=0;
-      std::atomic_thread_fence(std::memory_order_release);
+//      std::atomic_thread_fence(std::memory_order_release);
 #if HCLIB_OMP
       real_sched_yield();
 //      hclib_yield_ult();
@@ -412,6 +420,8 @@ extern "C" int sched_yield(void) {
     //printf("Original\n");
     real_sched_yield();
   }
+
+  return 0;
 }
 
 extern "C" unsigned short interop_get_random() {
@@ -573,13 +583,14 @@ void interop_suspend_worker(kmp_int32 gtid, kmp_team_t *parent_team) {
 
 void interop_var_finalize() {
 #if HCLIB_OMP
-  for (int i =0; i<interop_get_num_workers();i++) {
+/*  for (int i =0; i<interop_get_num_workers();i++) {
     delete prevGtid[i];
     delete masterRunning[i];
-  }
+  }*/
   delete prevGtid;
   delete masterRunning;
   delete interop_worker_init;
+  delete inOpenMP;
   delete nest_level;
 //  __kmp_free(prevGtid); // = (int *) aligned_alloc(getpagesize(), sizeof(int) * interop_get_num_workers());
 //  __kmp_free(masterRunning); // = (int*) aligned_alloc(getpagesize(), sizeof(int) * interop_get_num_workers());
@@ -699,6 +710,7 @@ void interop_master_wait(kmp_info_t *th, volatile kmp_int32 *barrier_count, kmp_
 
   interop_thread_local(masterRunning) = 1;
   void *msg = NULL;
+  atomic_thread_fence(std::memory_order_acquire);
   while (*barrier_count > 0) {
     if (sched_task) {
 #if HCLIB_OMP
@@ -728,7 +740,9 @@ void interop_master_wait(kmp_info_t *th, volatile kmp_int32 *barrier_count, kmp_
     } else {
       real_sched_yield();
     }
+    atomic_thread_fence(std::memory_order_acquire);
   }
+  KMP_ASSERT(*barrier_count == 0);
   if (reset_val >= 0)
     TCW_4(*barrier_count, reset_val);
   interop_thread_local(masterRunning) = 0;
@@ -755,15 +769,31 @@ void interop_schedule_task(void *interop_task) {
   return;
 }
 
-void* interop_pop_task() {
+
+extern "C" bool interop_task_is_allowed(hclib_task_t *task) {
+  kmp_int32 gtid = __kmp_get_gtid();
+  kmp_info_t* thread = __kmp_threads[gtid];
+//  hclib_task_t *cur_task = reinterpret_cast<hclib_task_t*>(task); 
+  kmp_task_t *omp_task = (kmp_task_t*)(task->args);
+  if(!__kmp_task_is_allowed(gtid, __kmp_task_stealing_constraint, KMP_TASK_TO_TASKDATA(omp_task), thread->th.th_current_task))
+    return false;
+  return true;
+}
+
+void* interop_pop_task(int gtid, kmp_int32 is_constrained,const kmp_taskdata_t *taskcurr ) {
   hclib_task_t *task = (hclib_task_t*) hclib_pop_ext_task();
   kmp_task_t *omp_task = NULL; 
-  if (task)
+  if (task) {
     omp_task = (kmp_task_t*)(task->args);
+/*    if (!__kmp_task_is_allowed(gtid, is_constrained, KMP_TASK_TO_TASKDATA(omp_task), taskcurr)) {
+        interop_schedule_task(task);
+        omp_task = NULL;
+    }*/
+  }
   return omp_task;
 }
 
-void* interop_steal_task() {
+void* interop_steal_task(int gtid, kmp_int32 is_constrained, const kmp_taskdata_t *taskcurr) {
   hclib_task_t *task =NULL;
   kmp_task_t *omp_task = NULL; 
 
@@ -771,11 +801,15 @@ void* interop_steal_task() {
   if (task) {
     omp_task = (kmp_task_t*)(task->args);
     KMP_ASSERT(omp_task->interop_task);
+/*    if (!__kmp_task_is_allowed(gtid, is_constrained, KMP_TASK_TO_TASKDATA(omp_task), taskcurr)) {
+        interop_schedule_task(task);
+        omp_task = NULL;
+    }*/
   }
   return omp_task;
 }
-void interop_execute_gang_task() {
-    hclib_execute_gang_task();
+void interop_execute_gang_task(int full) {
+    hclib_execute_gang_task(full);
 }
 
 

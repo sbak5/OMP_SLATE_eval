@@ -26,18 +26,18 @@ kmp_target_offload_kind_t TargetOffloadPolicy = tgt_default;
 std::mutex TargetOffloadMtx;
 
 ////////////////////////////////////////////////////////////////////////////////
-/// manage the success or failure of a target constuct
+/// manage the success or failure of a target construct
 
 static void HandleDefaultTargetOffload() {
   TargetOffloadMtx.lock();
   if (TargetOffloadPolicy == tgt_default) {
     if (omp_get_num_devices() > 0) {
       DP("Default TARGET OFFLOAD policy is now mandatory "
-         "(devicew were found)\n");
+         "(devices were found)\n");
       TargetOffloadPolicy = tgt_mandatory;
     } else {
       DP("Default TARGET OFFLOAD policy is now disabled "
-         "(devices were not found)\n");
+         "(no devices were found)\n");
       TargetOffloadPolicy = tgt_disabled;
     }
   }
@@ -57,8 +57,8 @@ static void HandleTargetOutcome(bool success) {
       }
       break;
     case tgt_default:
-        FATAL_MESSAGE0(1, "default offloading policy must switched to " 
-            "mandatory or disabled");
+      FATAL_MESSAGE0(1, "default offloading policy must be switched to "
+                        "mandatory or disabled");
       break;
     case tgt_mandatory:
       if (!success) {
@@ -69,15 +69,21 @@ static void HandleTargetOutcome(bool success) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+/// adds requires flags
+EXTERN void __tgt_register_requires(int64_t flags) {
+  RTLs->RegisterRequires(flags);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 /// adds a target shared library to the target execution image
 EXTERN void __tgt_register_lib(__tgt_bin_desc *desc) {
-  RTLs.RegisterLib(desc);
+  RTLs->RegisterLib(desc);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// unloads a target shared library
 EXTERN void __tgt_unregister_lib(__tgt_bin_desc *desc) {
-  RTLs.UnregisterLib(desc);
+  RTLs->UnregisterLib(desc);
 }
 
 /// creates host-to-target data mapping, stores it in the
@@ -102,18 +108,18 @@ EXTERN void __tgt_target_data_begin(int64_t device_id, int32_t arg_num,
     return;
   }
 
-  DeviceTy& Device = Devices[device_id];
+  DeviceTy &Device = Devices[device_id];
 
 #ifdef OMPTARGET_DEBUG
-  for (int i=0; i<arg_num; ++i) {
+  for (int i = 0; i < arg_num; ++i) {
     DP("Entry %2d: Base=" DPxMOD ", Begin=" DPxMOD ", Size=%" PRId64
-        ", Type=0x%" PRIx64 "\n", i, DPxPTR(args_base[i]), DPxPTR(args[i]),
-        arg_sizes[i], arg_types[i]);
+       ", Type=0x%" PRIx64 "\n",
+       i, DPxPTR(args_base[i]), DPxPTR(args[i]), arg_sizes[i], arg_types[i]);
   }
 #endif
 
-  int rc = target_data_begin(Device, arg_num, args_base,
-      args, arg_sizes, arg_types);
+  int rc = target_data_begin(Device, arg_num, args_base, args, arg_sizes,
+                             arg_types, nullptr);
   HandleTargetOutcome(rc == OFFLOAD_SUCCESS);
 }
 
@@ -122,7 +128,7 @@ EXTERN void __tgt_target_data_begin_nowait(int64_t device_id, int32_t arg_num,
     int32_t depNum, void *depList, int32_t noAliasDepNum,
     void *noAliasDepList) {
   if (depNum + noAliasDepNum > 0)
-    __kmpc_omp_taskwait(NULL, 0);
+    __kmpc_omp_taskwait(NULL, __kmpc_global_thread_num(NULL));
 
   __tgt_target_data_begin(device_id, arg_num, args_base, args, arg_sizes,
                           arg_types);
@@ -141,9 +147,9 @@ EXTERN void __tgt_target_data_end(int64_t device_id, int32_t arg_num,
     device_id = omp_get_default_device();
   }
 
-  RTLsMtx.lock();
+  RTLsMtx->lock();
   size_t Devices_size = Devices.size();
-  RTLsMtx.unlock();
+  RTLsMtx->unlock();
   if (Devices_size <= (size_t)device_id) {
     DP("Device ID  %" PRId64 " does not have a matching RTL.\n", device_id);
     HandleTargetOutcome(false);
@@ -165,8 +171,8 @@ EXTERN void __tgt_target_data_end(int64_t device_id, int32_t arg_num,
   }
 #endif
 
-  int rc = target_data_end(Device, arg_num, args_base,
-      args, arg_sizes, arg_types);
+  int rc = target_data_end(Device, arg_num, args_base, args, arg_sizes,
+                           arg_types, nullptr);
   HandleTargetOutcome(rc == OFFLOAD_SUCCESS);
 }
 
@@ -175,7 +181,7 @@ EXTERN void __tgt_target_data_end_nowait(int64_t device_id, int32_t arg_num,
     int32_t depNum, void *depList, int32_t noAliasDepNum,
     void *noAliasDepList) {
   if (depNum + noAliasDepNum > 0)
-    __kmpc_omp_taskwait(NULL, 0);
+    __kmpc_omp_taskwait(NULL, __kmpc_global_thread_num(NULL));
 
   __tgt_target_data_end(device_id, arg_num, args_base, args, arg_sizes,
                         arg_types);
@@ -208,7 +214,7 @@ EXTERN void __tgt_target_data_update_nowait(
     int64_t *arg_sizes, int64_t *arg_types, int32_t depNum, void *depList,
     int32_t noAliasDepNum, void *noAliasDepList) {
   if (depNum + noAliasDepNum > 0)
-    __kmpc_omp_taskwait(NULL, 0);
+    __kmpc_omp_taskwait(NULL, __kmpc_global_thread_num(NULL));
 
   __tgt_target_data_update(device_id, arg_num, args_base, args, arg_sizes,
                            arg_types);
@@ -249,7 +255,7 @@ EXTERN int __tgt_target_nowait(int64_t device_id, void *host_ptr,
     int64_t *arg_types, int32_t depNum, void *depList, int32_t noAliasDepNum,
     void *noAliasDepList) {
   if (depNum + noAliasDepNum > 0)
-    __kmpc_omp_taskwait(NULL, 0);
+    __kmpc_omp_taskwait(NULL, __kmpc_global_thread_num(NULL));
 
   return __tgt_target(device_id, host_ptr, arg_num, args_base, args, arg_sizes,
                       arg_types);
@@ -292,16 +298,39 @@ EXTERN int __tgt_target_teams_nowait(int64_t device_id, void *host_ptr,
     int64_t *arg_types, int32_t team_num, int32_t thread_limit, int32_t depNum,
     void *depList, int32_t noAliasDepNum, void *noAliasDepList) {
   if (depNum + noAliasDepNum > 0)
-    __kmpc_omp_taskwait(NULL, 0);
+    __kmpc_omp_taskwait(NULL, __kmpc_global_thread_num(NULL));
 
   return __tgt_target_teams(device_id, host_ptr, arg_num, args_base, args,
                             arg_sizes, arg_types, team_num, thread_limit);
 }
 
+// Get the current number of components for a user-defined mapper.
+EXTERN int64_t __tgt_mapper_num_components(void *rt_mapper_handle) {
+  auto *MapperComponentsPtr = (struct MapperComponentsTy *)rt_mapper_handle;
+  int64_t size = MapperComponentsPtr->Components.size();
+  DP("__tgt_mapper_num_components(Handle=" DPxMOD ") returns %" PRId64 "\n",
+     DPxPTR(rt_mapper_handle), size);
+  return size;
+}
 
-// The trip count mechanism will be revised - this scheme is not thread-safe.
+// Push back one component for a user-defined mapper.
+EXTERN void __tgt_push_mapper_component(void *rt_mapper_handle, void *base,
+                                        void *begin, int64_t size,
+                                        int64_t type) {
+  DP("__tgt_push_mapper_component(Handle=" DPxMOD
+     ") adds an entry (Base=" DPxMOD ", Begin=" DPxMOD ", Size=%" PRId64
+     ", Type=0x%" PRIx64 ").\n",
+     DPxPTR(rt_mapper_handle), DPxPTR(base), DPxPTR(begin), size, type);
+  auto *MapperComponentsPtr = (struct MapperComponentsTy *)rt_mapper_handle;
+  MapperComponentsPtr->Components.push_back(
+      MapComponentInfoTy(base, begin, size, type));
+}
+
 EXTERN void __kmpc_push_target_tripcount(int64_t device_id,
     uint64_t loop_tripcount) {
+  if (IsOffloadDisabled())
+    return;
+
   if (device_id == OFFLOAD_DEVICE_DEFAULT) {
     device_id = omp_get_default_device();
   }
@@ -314,5 +343,8 @@ EXTERN void __kmpc_push_target_tripcount(int64_t device_id,
 
   DP("__kmpc_push_target_tripcount(%" PRId64 ", %" PRIu64 ")\n", device_id,
       loop_tripcount);
-  Devices[device_id].loopTripCnt = loop_tripcount;
+  TblMapMtx->lock();
+  Devices[device_id].LoopTripCnt.emplace(__kmpc_global_thread_num(NULL),
+                                         loop_tripcount);
+  TblMapMtx->unlock();
 }

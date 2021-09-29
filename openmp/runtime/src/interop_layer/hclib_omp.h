@@ -5,9 +5,16 @@
 #include "interop_ext_comm.h"
 #include <vector>
 #define INIT_NEST_LEVEL 10
-extern std::vector<int> **prevGtid;
-extern std::vector<int> **masterRunning;
+#define CACHE_LINE_SIZE_ 64
+extern std::vector<std::vector<int>> *prevGtid;
+extern std::vector<std::vector<int>> *masterRunning;
 extern interop_ext_comm *commStruct;
-extern int *nest_level;
-extern int *interop_worker_init;
+
+struct AlignedInt {
+  alignas(CACHE_LINE_SIZE_) int val=0;
+};
+
+extern std::vector<AlignedInt> *nest_level;
+extern std::vector<AlignedInt> *interop_worker_init;
+extern std::vector<AlignedInt> *inOpenMP;
 #endif

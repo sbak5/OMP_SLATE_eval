@@ -7,7 +7,7 @@ extern cpu_set_t allCPU;
 
 //#include "kmp_ftn_entry.h"
 extern int (*real_sched_yield)();
-extern thread_local int inOpenMP; //=0;
+//extern thread_local int inOpenMP; //=0;
 
 extern int interop_omp_init; //=0;
 extern int argc; 
@@ -19,7 +19,7 @@ extern char **argv;
 #include "hclib.h"
 #include "hclib_omp.h"
 //#define interop_thread_local(x) x[hclib_get_current_worker()]
-#define interop_thread_local_other(x, id) x[id]
+//#define interop_thread_local_other(x, id) x[id]
 #elif CHARM_OMP || CONV_OMP
 #define interop_thread_local(x) CpvAccess(x)
 #define interop_thread_local_other(x, id) CpvAccessOther(x, id)
@@ -77,13 +77,13 @@ void *interop_create_task(void (*func)(void*), kmp_task_t *task);
 
 void interop_schedule_task(void *interop_task);
 
-void *interop_pop_task();
+void *interop_pop_task(int gtid, kmp_int32 is_constrained, const kmp_taskdata_t *taskcurr);
 
-void *interop_steal_task();
+void *interop_steal_task(int gtid, kmp_int32 is_constrained, const kmp_taskdata_t *taskcurr );
 
-void interop_execute_task(void*);
+extern "C" void interop_execute_task(void*);
 
-void interop_execute_gang_task();
+void interop_execute_gang_task(int);
 
 // inline functions to create / resume / reap user-level threads
 inline void interop_create_thread(void* (*start_func)(void *), kmp_info_t *th, int stack_size) {
@@ -150,9 +150,34 @@ template<typename T> inline T& interop_thread_local(T* var) {
   return var[interop_get_worker_id()]; 
 }
 
-inline int& interop_thread_local(std::vector<int> **var) {
-  return var[interop_get_worker_id()]->at(interop_thread_local(nest_level)); 
+template<typename T> inline T& interop_thread_local_other(T* var, int id) {
+  return var[id]; 
 }
+
+
+inline int& interop_thread_local(std::vector<AlignedInt>* var) {
+  std::vector<AlignedInt>&cur_vec = *var;
+  return (cur_vec[interop_get_worker_id()]).val; 
+}
+
+inline int& interop_thread_local_other(std::vector<AlignedInt>* var, int id) {
+  std::vector<AlignedInt>&cur_vec = *var;
+  return (cur_vec[id]).val; 
+}
+
+
+inline int& interop_thread_local(std::vector<std::vector<int>> *var) {
+  std::vector<std::vector<int>>&cur_vec = *var;
+
+  return cur_vec[interop_get_worker_id()][interop_thread_local(nest_level)]; 
+}
+
+inline int& interop_thread_local_other(std::vector<std::vector<int>> *var, int id) {
+  std::vector<std::vector<int>>&cur_vec = *var;
+
+  return cur_vec[id][interop_thread_local(nest_level)]; 
+}
+
 
 inline void interop_set_global_variable(int gtid, int enter, int jump) {
 //  int *global_id;
@@ -174,9 +199,9 @@ inline void interop_set_global_variable(int gtid, int enter, int jump) {
     __kmp_gtid = gtid;
 #endif
     __kmp_gtid_set_specific(gtid);
-    inOpenMP = 1;
+    interop_thread_local(inOpenMP) = 1;
   } else {
-    int &global_id = interop_thread_local(prevGtid);
+    int global_id = interop_thread_local(prevGtid);
     if (global_id >=0) {
 #if KMP_TDATA_GTID
       __kmp_gtid = global_id;
@@ -185,7 +210,7 @@ inline void interop_set_global_variable(int gtid, int enter, int jump) {
     }
     if (interop_thread_local(nest_level) > 0)
         interop_thread_local(nest_level)--;
-    inOpenMP = 0;
+    interop_thread_local(inOpenMP) = 0;
   }
   HASSERT(interop_thread_local(nest_level) < INIT_NEST_LEVEL && interop_thread_local(nest_level) >=0);
 

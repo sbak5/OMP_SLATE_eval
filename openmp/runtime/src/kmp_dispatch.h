@@ -75,7 +75,7 @@ template <typename T> struct dispatch_private_infoXX_template {
   ST st; // signed
   UT tc; // unsigned
   T static_steal_counter; // for static_steal only; maybe better to put after ub
-
+  kmp_lock_t *th_steal_lock; // lock used for chunk stealing
   /* parm[1-4] are used in different ways by different scheduling algorithms */
 
   // KMP_ALIGN( 32 ) ensures ( if the KMP_ALIGN macro is turned on )
@@ -171,11 +171,9 @@ template <typename T> struct dispatch_shared_info_template {
     dispatch_shared_info64_t s64;
   } u;
   volatile kmp_uint32 buffer_index;
-#if OMP_45_ENABLED
   volatile kmp_int32 doacross_buf_idx; // teamwise index
   kmp_uint32 *doacross_flags; // array of iteration flags (0/1)
   kmp_int32 doacross_num_done; // count finished threads
-#endif
 #if KMP_USE_HIER_SCHED
   kmp_hier_t<T> *hier;
 #endif

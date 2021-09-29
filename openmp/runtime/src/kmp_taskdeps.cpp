@@ -20,8 +20,6 @@
 #include "ompt-specific.h"
 #endif
 
-#if OMP_40_ENABLED
-
 // TODO: Improve memory allocation? keep a list of pre-allocated structures?
 // allocate in blocks? re-use list finished list entries?
 // TODO: don't use atomic ref counters for stack-allocated nodes.
@@ -37,7 +35,7 @@ static std::atomic<kmp_int32> kmp_node_id_seed = ATOMIC_VAR_INIT(0);
 
 static void __kmp_init_node(kmp_depnode_t *node) {
   node->dn.successors = NULL;
-  node->dn.task = NULL; // will point to the rigth task
+  node->dn.task = NULL; // will point to the right task
   // once dependences have been processed
   for (int i = 0; i < MAX_MTX_DEPS; ++i)
     node->dn.mtx_locks[i] = NULL;
@@ -56,10 +54,60 @@ static inline kmp_depnode_t *__kmp_node_ref(kmp_depnode_t *node) {
 
 enum { KMP_DEPHASH_OTHER_SIZE = 97, KMP_DEPHASH_MASTER_SIZE = 997 };
 
+size_t sizes[] = { 997, 2003, 4001, 8191, 16001, 32003, 64007, 131071, 270029 };
+const size_t MAX_GEN = 8;
+
 static inline kmp_int32 __kmp_dephash_hash(kmp_intptr_t addr, size_t hsize) {
   // TODO alternate to try: set = (((Addr64)(addrUsefulBits * 9.618)) %
   // m_num_sets );
   return ((addr >> 6) ^ (addr >> 2)) % hsize;
+}
+
+static kmp_dephash_t *__kmp_dephash_extend(kmp_info_t *thread,
+                                           kmp_dephash_t *current_dephash) {
+  kmp_dephash_t *h;
+  size_t gen = current_dephash->generation + 1;
+  if (gen >= MAX_GEN)
+    return current_dephash;
+  size_t new_size = sizes[gen];
+
+  kmp_int32 size_to_allocate =
+      new_size * sizeof(kmp_dephash_entry_t *) + sizeof(kmp_dephash_t);
+
+#if USE_FAST_MEMORY
+  h = (kmp_dephash_t *)__kmp_fast_allocate(thread, size_to_allocate);
+#else
+  h = (kmp_dephash_t *)__kmp_thread_malloc(thread, size_to_allocate);
+#endif
+  memset(h, 0, size_to_allocate);
+  h->size = new_size;
+  h->nelements = current_dephash->nelements;
+  h->buckets = (kmp_dephash_entry **)(h + 1);
+  h->generation = gen;
+  h->nconflicts = 0;
+  // insert existing elements in the new table
+  for (size_t i = 0; i < current_dephash->size; i++) {
+    kmp_dephash_entry_t *next, *entry;
+    for (entry = current_dephash->buckets[i]; entry; entry = next) {
+      next = entry->next_in_bucket;
+      // Compute the new hash using the new size, and insert the entry in
+      // the new bucket.
+      kmp_int32 new_bucket = __kmp_dephash_hash(entry->addr, h->size);
+      entry->next_in_bucket = h->buckets[new_bucket];
+      if (entry->next_in_bucket) {
+        h->nconflicts++;
+      }
+      h->buckets[new_bucket] = entry;
+    }
+  }
+
+  // Free old hash table
+#if USE_FAST_MEMORY
+  __kmp_fast_free(thread, current_dephash);
+#else
+  __kmp_thread_free(thread, current_dephash);
+#endif
+  return h;
 }
 
 static kmp_dephash_t *__kmp_dephash_create(kmp_info_t *thread,
@@ -83,10 +131,9 @@ static kmp_dephash_t *__kmp_dephash_create(kmp_info_t *thread,
 #endif
   h->size = h_size;
 
-#ifdef KMP_DEBUG
+  h->generation = 0;
   h->nelements = 0;
   h->nconflicts = 0;
-#endif
   h->buckets = (kmp_dephash_entry **)(h + 1);
 
   for (size_t i = 0; i < h_size; i++)
@@ -99,7 +146,13 @@ static kmp_dephash_t *__kmp_dephash_create(kmp_info_t *thread,
 #define ENTRY_LAST_MTXS 1
 
 static kmp_dephash_entry *
-__kmp_dephash_find(kmp_info_t *thread, kmp_dephash_t *h, kmp_intptr_t addr) {
+__kmp_dephash_find(kmp_info_t *thread, kmp_dephash_t **hash, kmp_intptr_t addr) {
+  kmp_dephash_t *h = *hash;
+  if (h->nelements != 0
+      && h->nconflicts/h->size >= 1) {
+    *hash = __kmp_dephash_extend(thread, h);
+    h = *hash;
+  }
   kmp_int32 bucket = __kmp_dephash_hash(addr, h->size);
 
   kmp_dephash_entry_t *entry;
@@ -124,11 +177,10 @@ __kmp_dephash_find(kmp_info_t *thread, kmp_dephash_t *h, kmp_intptr_t addr) {
     entry->mtx_lock = NULL;
     entry->next_in_bucket = h->buckets[bucket];
     h->buckets[bucket] = entry;
-#ifdef KMP_DEBUG
     h->nelements++;
     if (entry->next_in_bucket)
       h->nconflicts++;
-#endif
+
   }
   return entry;
 }
@@ -234,7 +286,7 @@ static inline kmp_int32 __kmp_depnode_link_successor(kmp_int32 gtid,
 
 template <bool filter>
 static inline kmp_int32
-__kmp_process_deps(kmp_int32 gtid, kmp_depnode_t *node, kmp_dephash_t *hash,
+__kmp_process_deps(kmp_int32 gtid, kmp_depnode_t *node, kmp_dephash_t **hash,
                    bool dep_barrier, kmp_int32 ndeps,
                    kmp_depend_info_t *dep_list, kmp_task_t *task) {
   KA_TRACE(30, ("__kmp_process_deps<%d>: T#%d processing %d dependencies : "
@@ -354,7 +406,7 @@ __kmp_process_deps(kmp_int32 gtid, kmp_depnode_t *node, kmp_dephash_t *hash,
 
 // returns true if the task has any outstanding dependence
 static bool __kmp_check_deps(kmp_int32 gtid, kmp_depnode_t *node,
-                             kmp_task_t *task, kmp_dephash_t *hash,
+                             kmp_task_t *task, kmp_dephash_t **hash,
                              bool dep_barrier, kmp_int32 ndeps,
                              kmp_depend_info_t *dep_list,
                              kmp_int32 ndeps_noalias,
@@ -364,7 +416,7 @@ static bool __kmp_check_deps(kmp_int32 gtid, kmp_depnode_t *node,
   kmp_taskdata_t *taskdata = KMP_TASK_TO_TASKDATA(task);
 #endif
   KA_TRACE(20, ("__kmp_check_deps: T#%d checking dependencies for task %p : %d "
-                "possibly aliased dependencies, %d non-aliased depedencies : "
+                "possibly aliased dependencies, %d non-aliased dependencies : "
                 "dep_barrier=%d .\n",
                 gtid, taskdata, ndeps, ndeps_noalias, dep_barrier));
 
@@ -420,8 +472,8 @@ static bool __kmp_check_deps(kmp_int32 gtid, kmp_depnode_t *node,
   npredecessors++;
 
   // Update predecessors and obtain current value to check if there are still
-  // any outstandig dependences (some tasks may have finished while we processed
-  // the dependences)
+  // any outstanding dependences (some tasks may have finished while we
+  // processed the dependences)
   npredecessors =
       node->dn.npredecessors.fetch_add(npredecessors) + npredecessors;
 
@@ -445,7 +497,7 @@ task''
 @param noalias_dep_list List of depend items with no aliasing
 
 @return Returns either TASK_CURRENT_NOT_QUEUED if the current task was not
-suspendend and queued, or TASK_CURRENT_QUEUED if it was suspended and queued
+suspended and queued, or TASK_CURRENT_QUEUED if it was suspended and queued
 
 Schedule a non-thread-switchable task with dependences for execution
 */
@@ -487,47 +539,40 @@ kmp_int32 __kmpc_omp_task_with_deps(ident_t *loc_ref, kmp_int32 gtid,
       ompt_enabled.ompt_callback_dependences) {
     kmp_int32 i;
 
-    new_taskdata->ompt_task_info.ndeps = ndeps + ndeps_noalias;
-    new_taskdata->ompt_task_info.deps =
-        (ompt_dependence_t *)KMP_OMPT_DEPS_ALLOC(
-            thread, (ndeps + ndeps_noalias) * sizeof(ompt_dependence_t));
+    int ompt_ndeps = ndeps + ndeps_noalias;
+    ompt_dependence_t *ompt_deps = (ompt_dependence_t *)KMP_OMPT_DEPS_ALLOC(
+        thread, (ndeps + ndeps_noalias) * sizeof(ompt_dependence_t));
 
-    KMP_ASSERT(new_taskdata->ompt_task_info.deps != NULL);
+    KMP_ASSERT(ompt_deps != NULL);
 
     for (i = 0; i < ndeps; i++) {
-      new_taskdata->ompt_task_info.deps[i].variable.ptr =
-          (void *)dep_list[i].base_addr;
+      ompt_deps[i].variable.ptr = (void *)dep_list[i].base_addr;
       if (dep_list[i].flags.in && dep_list[i].flags.out)
-        new_taskdata->ompt_task_info.deps[i].dependence_type =
-            ompt_dependence_type_inout;
+        ompt_deps[i].dependence_type = ompt_dependence_type_inout;
       else if (dep_list[i].flags.out)
-        new_taskdata->ompt_task_info.deps[i].dependence_type =
-            ompt_dependence_type_out;
+        ompt_deps[i].dependence_type = ompt_dependence_type_out;
       else if (dep_list[i].flags.in)
-        new_taskdata->ompt_task_info.deps[i].dependence_type =
-            ompt_dependence_type_in;
+        ompt_deps[i].dependence_type = ompt_dependence_type_in;
+      else if (dep_list[i].flags.mtx)
+        ompt_deps[i].dependence_type = ompt_dependence_type_mutexinoutset;
     }
     for (i = 0; i < ndeps_noalias; i++) {
-      new_taskdata->ompt_task_info.deps[ndeps + i].variable.ptr =
-          (void *)noalias_dep_list[i].base_addr;
+      ompt_deps[ndeps + i].variable.ptr = (void *)noalias_dep_list[i].base_addr;
       if (noalias_dep_list[i].flags.in && noalias_dep_list[i].flags.out)
-        new_taskdata->ompt_task_info.deps[ndeps + i].dependence_type =
-            ompt_dependence_type_inout;
+        ompt_deps[ndeps + i].dependence_type = ompt_dependence_type_inout;
       else if (noalias_dep_list[i].flags.out)
-        new_taskdata->ompt_task_info.deps[ndeps + i].dependence_type =
-            ompt_dependence_type_out;
+        ompt_deps[ndeps + i].dependence_type = ompt_dependence_type_out;
       else if (noalias_dep_list[i].flags.in)
-        new_taskdata->ompt_task_info.deps[ndeps + i].dependence_type =
-            ompt_dependence_type_in;
+        ompt_deps[ndeps + i].dependence_type = ompt_dependence_type_in;
+      else if (noalias_dep_list[i].flags.mtx)
+        ompt_deps[ndeps + i].dependence_type =
+            ompt_dependence_type_mutexinoutset;
     }
     ompt_callbacks.ompt_callback(ompt_callback_dependences)(
-        &(new_taskdata->ompt_task_info.task_data),
-        new_taskdata->ompt_task_info.deps, new_taskdata->ompt_task_info.ndeps);
+        &(new_taskdata->ompt_task_info.task_data), ompt_deps, ompt_ndeps);
     /* We can now free the allocated memory for the dependencies */
-    /* For OMPD we might want to delay the free until task_end */
-    KMP_OMPT_DEPS_FREE(thread, new_taskdata->ompt_task_info.deps);
-    new_taskdata->ompt_task_info.deps = NULL;
-    new_taskdata->ompt_task_info.ndeps = 0;
+    /* For OMPD we might want to delay the free until end of this function */
+    KMP_OMPT_DEPS_FREE(thread, ompt_deps);
   }
 #endif /* OMPT_OPTIONAL */
 #endif /* OMPT_SUPPORT */
@@ -535,10 +580,8 @@ kmp_int32 __kmpc_omp_task_with_deps(ident_t *loc_ref, kmp_int32 gtid,
   bool serial = current_task->td_flags.team_serial ||
                 current_task->td_flags.tasking_ser ||
                 current_task->td_flags.final;
-#if OMP_45_ENABLED
   kmp_task_team_t *task_team = thread->th.th_task_team;
   serial = serial && !(task_team && task_team->tt.tt_found_proxy_tasks);
-#endif
 
   if (!serial && (ndeps > 0 || ndeps_noalias > 0)) {
     /* if no dependencies have been tracked yet, create the dependence hash */
@@ -556,7 +599,7 @@ kmp_int32 __kmpc_omp_task_with_deps(ident_t *loc_ref, kmp_int32 gtid,
     __kmp_init_node(node);
     new_taskdata->td_depnode = node;
 
-    if (__kmp_check_deps(gtid, node, new_task, current_task->td_dephash,
+    if (__kmp_check_deps(gtid, node, new_task, &current_task->td_dephash,
                          NO_DEP_BARRIER, ndeps, dep_list, ndeps_noalias,
                          noalias_dep_list)) {
       KA_TRACE(10, ("__kmpc_omp_task_with_deps(exit): T#%d task had blocking "
@@ -623,10 +666,8 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
   bool ignore = current_task->td_flags.team_serial ||
                 current_task->td_flags.tasking_ser ||
                 current_task->td_flags.final;
-#if OMP_45_ENABLED
   ignore = ignore && thread->th.th_task_team != NULL &&
            thread->th.th_task_team->tt.tt_found_proxy_tasks == FALSE;
-#endif
   ignore = ignore || current_task->td_dephash == NULL;
 
   if (ignore) {
@@ -639,7 +680,7 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
   kmp_depnode_t node = {0};
   __kmp_init_node(&node);
 
-  if (!__kmp_check_deps(gtid, &node, NULL, current_task->td_dephash,
+  if (!__kmp_check_deps(gtid, &node, NULL, &current_task->td_dephash,
                         DEP_BARRIER, ndeps, dep_list, ndeps_noalias,
                         noalias_dep_list)) {
     KA_TRACE(10, ("__kmpc_omp_wait_deps(exit): T#%d has no blocking "
@@ -659,5 +700,3 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
   KA_TRACE(10, ("__kmpc_omp_wait_deps(exit): T#%d finished waiting : loc=%p\n",
                 gtid, loc_ref));
 }
-
-#endif /* OMP_40_ENABLED */
